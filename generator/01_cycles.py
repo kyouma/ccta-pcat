@@ -24,6 +24,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+from tqdm import tqdm
 
 import common
 from common import _cell_edges, build_multigraph, read_centerline
@@ -85,14 +86,10 @@ def measure_cycles(cl: common.Centerline) -> dict:
 
 def run(scan_ids: list[str]) -> list[dict]:
     rows = []
-    for scan_id in scan_ids:
+    for scan_id in tqdm(scan_ids, desc="cycles", unit="scan", mininterval=5.0):
         for tree in ("left", "right"):
             cl = read_centerline(scan_id, tree)
             rows.append(measure_cycles(cl))
-            print(f"  скан {scan_id} {tree:>5}: циклов {rows[-1]['n_cycles']}, "
-                  f"компонент {rows[-1]['n_components']}, "
-                  f"параллельных рёбер {rows[-1]['n_parallel']}, "
-                  f"общих рёбер {rows[-1]['n_shared_edges']}")
     return rows
 
 

@@ -32,6 +32,7 @@ import matplotlib.lines as mlines
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import binary_dilation, label as cc_label, median_filter
+from tqdm import tqdm
 
 import common
 from common import (MIN_FRAGMENT_MM, SEGMENT_NAMES, TARGET_IDS, WINDOWS,
@@ -360,7 +361,7 @@ def main() -> int:
         (out_dir / sub).mkdir(parents=True, exist_ok=True)
 
     index_rows: list[dict] = []
-    for scan_id in scan_ids:
+    for scan_id in tqdm(scan_ids, desc="generate", unit="scan", mininterval=5.0):
         ps = prepare_scan(scan_id, use_cache=not args.no_cache)
         # Отдельно сохраняем радиус в каждой точке дерева — это самостоятельный
         # результат, полезный и вне фрагментов.

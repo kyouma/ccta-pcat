@@ -27,6 +27,7 @@ import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from scipy.ndimage import gaussian_filter
+from tqdm import tqdm
 
 import common
 from common import (PALETTE, SEGMENT_NAMES, read_centerline, read_ct, read_mask,
@@ -279,7 +280,7 @@ def main() -> int:
     print(f"сканов: {len(scan_ids)} (split {args.split})")
 
     out_dir = args.out / "overlay"
-    for scan_id in scan_ids:
+    for scan_id in tqdm(scan_ids, desc="overlay", unit="scan", mininterval=5.0):
         ct, affine = read_ct(scan_id)
         mask, affine_m, zooms = read_mask(scan_id)
         check_geometry(affine, affine_m)
@@ -292,7 +293,6 @@ def main() -> int:
         save_labels_tiff(mask, zooms, out_dir / f"{scan_id}_labels.tif")
         save_lut(mask, out_dir / f"{scan_id}_lut.txt")
         save_png(ct, mask, affine, zooms, lines, out_dir / f"{scan_id}_overlay.png")
-        print(f"  {scan_id}: NIfTI + TIFF + labels + LUT + PNG")
     save_readme(out_dir / "README.txt")
     print(f"готово: {out_dir}")
     return 0

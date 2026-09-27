@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 from scipy.spatial import cKDTree
+from tqdm import tqdm
 
 import common
 from common import (MAX_SNAP_MM, RADIUS_SANITY, SEGMENT_NAMES, TARGET_IDS, build_graph,
@@ -197,7 +198,7 @@ def main() -> int:
 
     vessel_rows: list[dict] = []
     orphan_scans: list[str] = []
-    for n, scan_id in enumerate(scan_ids, 1):
+    for scan_id in tqdm(scan_ids, desc="qc", unit="scan", mininterval=5.0):
         scan, rows = qc_scan(scan_id)
         vessel_rows.extend(rows)
         has_orphan = False
@@ -212,8 +213,6 @@ def main() -> int:
                     f"> {MAX_SNAP_MM:g} мм: {t['snap_out_pct']:.1f}%")
         if has_orphan:
             orphan_scans.append(scan_id)
-        if n % 10 == 0:
-            print(f"  ... {n}/{len(scan_ids)}")
 
     rep.add("")
     rep.add(f"Сканы с оторванными компонентами (без устья): "
