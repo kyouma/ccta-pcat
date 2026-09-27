@@ -24,7 +24,7 @@ out/            — все результаты и кэш
 ```
 
 Зависимости: `numpy`, `scipy`, `networkx`, `nibabel`, `vtk`, `tifffile`,
-`matplotlib`. Окружение: `/home/o.tonisheva/anaconda3/envs/gendata/bin/python`.
+`matplotlib`.
 
 ## 3. Данные и соглашения
 

@@ -16,8 +16,7 @@
 
 ## Требования
 
-- Python-окружение: `/home/o.tonisheva/anaconda3/envs/gendata/bin/python`
-  (`numpy`, `scipy`, `networkx`, `nibabel`, `vtk`, `tifffile`, `matplotlib`).
+- Python-окружение: `python` (`numpy`, `scipy`, `networkx`, `nibabel`, `vtk`, `tifffile`, `matplotlib`).
 - Данные (нативные сетки, ресемплинга нет):
   - КТ ImageCAS: `/srv/fast1/y.pchelitsev/datasets/ImageCAS/data`
   - ImageCAS-X: `/srv/fast1/y.pchelitsev/datasets/ImageCAS-X`
@@ -28,14 +27,13 @@
 ## Быстрый старт
 
 ```bash
-cd /home/y.pchelintsev/vessel-seg/pfai_gen/generator
-PY=/home/o.tonisheva/anaconda3/envs/gendata/bin/python
+cd generator
 
-$PY 01_cycles.py --split test            # распределение циклов в центрлиниях
-$PY 02_overlay.py --ids 961              # маска + центрлинии на КТ (TIFF/NIfTI/PNG)
-$PY 03_qc.py --split test --limit 20     # QC: радиусы, длины, snap, метки
-$PY 04_generate.py --ids 961             # 3 фрагмента (LAD, LCx, RCA) на скан
-$PY 04_generate.py --split test          # весь сплит
+python 01_cycles.py --split test            # распределение циклов в центрлиниях
+python 02_overlay.py --ids 961              # маска + центрлинии на КТ (TIFF/NIfTI/PNG)
+python 03_qc.py --split test --limit 20     # QC: радиусы, длины, snap, метки
+python 04_generate.py --ids 961             # 3 фрагмента (LAD, LCx, RCA) на скан
+python 04_generate.py --split test          # весь сплит
 ```
 
 Полезные флаги `04_generate.py`:

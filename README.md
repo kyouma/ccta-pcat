@@ -33,10 +33,9 @@ detector/    (планируется) детектор/сегментатор с
 
 ```bash
 cd generator
-PY=/home/o.tonisheva/anaconda3/envs/gendata/bin/python
 
-$PY 04_generate.py --ids 961     # 3 фрагмента (LAD, LCx, RCA) на скан
-$PY 04_generate.py --split test  # весь тестовый сплит
+python 04_generate.py --ids 961     # 3 фрагмента (LAD, LCx, RCA) на скан
+python 04_generate.py --split test  # весь тестовый сплит
 ```
 
 ## Данные
