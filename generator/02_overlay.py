@@ -188,8 +188,11 @@ def save_png(ct, mask, affine, zooms, lines, path) -> None:
     present = [int(v) for v in np.unique(mask) if v]
     view = _view_limits(mask, affine)
     # Две строки: сверху — только сосуды (tube-MIP, без разметки), снизу — разметка.
-    fig, axes = plt.subplots(2, 3, figsize=(19, 11.2), dpi=130,
-                             gridspec_kw={"hspace": 0.22, "wspace": 0.32})
+    # constrained_layout сам резервирует место под suptitle и fig.legend (в отличие
+    # от tight_layout, который suptitle игнорирует). Легенду ставим через
+    # loc="outside lower center" — тогда движок выделяет ей отдельную полосу снизу
+    # и она не налезает на подписи оси x второй строки.
+    fig, axes = plt.subplots(2, 3, figsize=(19, 11.2), dpi=130, layout="constrained")
     for k, (title, drop, row, col, rlab, clab) in enumerate(PANELS):
         sr, sc = float(zooms[row]), float(zooms[col])
         base, flip_r, flip_c = _orient(grey, drop, row, col, affine)
@@ -239,13 +242,12 @@ def save_png(ct, mask, affine, zooms, lines, path) -> None:
                      label=f"{l} {SEGMENT_NAMES.get(l, l)}")
                for i, l in enumerate(present)]
     handles.append(Line2D([0], [0], color="black", lw=1.4, label="центральная линия"))
-    fig.legend(handles=handles, loc="lower center", ncol=min(len(handles), 7),
+    fig.legend(handles=handles, loc="outside lower center", ncol=min(len(handles), 7),
                frameon=False, fontsize=9)
     fig.suptitle("Верх — сосуды (tube-MIP, без разметки); низ — маски и центрлинии "
                  f"(цвет маски смешан с КТ, α={ALPHA:g})", fontsize=13)
-    fig.subplots_adjust(top=0.93, bottom=0.085)
     path = common._ensure_parent(path)
-    fig.savefig(path, bbox_inches="tight")
+    fig.savefig(path)
     plt.close(fig)
 
 
