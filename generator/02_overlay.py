@@ -40,8 +40,8 @@ LINE_RADIUS_VOX = 0    # без дилатации — линия толщино
 # трубки, берётся MIP только внутри трубки (целевой сосуд не перекрывается чужой
 # кровью/костью), а в остальных местах — обычный MIP (другие сосуды видны).
 TUBE_K = 5.0           # радиус трубки = K * локальный радиус сосуда
-TUBE_SOFT_MM = 1.0     # ширина мягкого края трубки, мм
-COVER_SIGMA_PX = 1.0   # размытие cover гауссом, пикселей
+TUBE_SOFT_MM = 2.0     # ширина мягкого края трубки, мм
+COVER_SIGMA_PX = 0.0   # размытие cover гауссом, пикселей (0 = выключено)
 
 
 def _tube_weight(mask, affine, zooms, lines) -> np.ndarray:
@@ -59,6 +59,9 @@ def _tube_weight(mask, affine, zooms, lines) -> np.ndarray:
     nodes_vox = world_to_voxel_index(affine, points)
     weight = np.zeros(mask.shape, dtype=np.float32)
     for p, r in zip(nodes_vox, tube_r):
+        # Мягкость на узел: не шире половины трубки, иначе у тонких сосудов
+        # вес в центре просвета не дойдёт до 1.
+        soft_mm = min(TUBE_SOFT_MM, 0.5 * r)
         rad = np.ceil(r / spacing).astype(int)
         lo = np.maximum(p - rad, 0)
         hi = np.minimum(p + rad + 1, shape)
@@ -67,7 +70,7 @@ def _tube_weight(mask, affine, zooms, lines) -> np.ndarray:
         g = [(np.arange(lo[a], hi[a]) - p[a]) * spacing[a] for a in range(3)]
         dist = np.sqrt(g[0][:, None, None] ** 2 + g[1][None, :, None] ** 2
                        + g[2][None, None, :] ** 2)
-        soft = np.clip((r - dist) / TUBE_SOFT_MM, 0.0, 1.0).astype(np.float32)
+        soft = np.clip((r - dist) / soft_mm, 0.0, 1.0).astype(np.float32)
         sub = weight[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
         np.maximum(sub, soft, out=sub)
     return weight
@@ -186,8 +189,10 @@ def save_png(ct, mask, affine, zooms, lines, path) -> None:
         sr, sc = float(zooms[row]), float(zooms[col])
         base, flip_r, flip_c = _orient(grey, drop, row, col, affine)
         cover, _, _ = _orient(tube, drop, row, col, affine)
-        # Размываем cover гауссом (в пикселях), чтобы сгладить край ореола.
-        cover = gaussian_filter(cover, sigma=COVER_SIGMA_PX, mode="nearest")
+        # Гаусс по cover — опционально (COVER_SIGMA_PX>0); мягкость края задаётся
+        # в основном TUBE_SOFT_MM в 3D, что согласованно влияет и на target.
+        if COVER_SIGMA_PX > 0:
+            cover = gaussian_filter(cover, sigma=COVER_SIGMA_PX, mode="nearest")
         target, _, _ = _orient(grey_tube, drop, row, col, affine)
         # Приоритет: где трубка перекрывает луч, показываем только её содержимое.
         proj = np.clip(np.maximum(base * (1.0 - cover), target), 0.0, 1.0)
