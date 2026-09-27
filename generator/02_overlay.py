@@ -143,8 +143,12 @@ def save_png(ct, mask, affine, zooms, lines, path) -> None:
                   vmin=0.0, vmax=1.0, aspect=sr / sc)
         tint, _, _ = _orient(mask_to_rgb(mask).astype(np.float32) / 255.0,
                              drop, row, col, affine)
-        ax.imshow(tint, origin="lower", interpolation="nearest", alpha=ALPHA,
-                  aspect=sr / sc)
+        # Прозрачность задаём ПО-ПИКСЕЛЬНО: alpha=0 вне маски. Иначе RGB-слой
+        # маски (чёрный фон) с глобальным alpha=0.55 затемняет весь скан до 45%.
+        mask_any, _, _ = _orient((mask > 0).astype(np.float32),
+                                 drop, row, col, affine)
+        ax.imshow(tint, origin="lower", interpolation="nearest",
+                  alpha=ALPHA * mask_any, aspect=sr / sc)
         for cl in lines.values():
             c, r = _voxel_in_view(cl.points, affine, row, col, proj.shape, flip_r, flip_c)
             for cell in cl.cells:          # ячейка = непрерывный путь вдоль сосуда
