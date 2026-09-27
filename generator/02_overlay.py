@@ -24,16 +24,53 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from scipy.ndimage import gaussian_filter
 
 import common
 from common import (PALETTE, SEGMENT_NAMES, read_centerline, read_ct, read_mask,
-                    check_geometry, grey_from_hu, mask_to_rgb, paint_points,
-                    save_rgb_nifti, save_mask_nifti, save_rgb_tiff, save_labels_tiff,
-                    to_voxel)
+                    check_geometry, edt_radius_all, grey_from_hu, mask_to_rgb,
+                    paint_points, save_rgb_nifti, save_mask_nifti, save_rgb_tiff,
+                    save_labels_tiff, to_voxel, world_to_voxel_index)
 
 ALPHA = 0.55           # доля цвета маски в смешении
 LINE_COLOR = (0, 0, 0)         # чёрные центрлинии: видны на ярких сосудах/костях
 LINE_RADIUS_VOX = 0    # без дилатации — линия толщиной 1 воксель, тоньше
+
+# MIP-приоритет по трубке вокруг центрлинии: на пиксель, накрытый проекцией
+# трубки, берётся MIP только внутри трубки (целевой сосуд не перекрывается чужой
+# кровью/костью), а в остальных местах — обычный MIP (другие сосуды видны).
+TUBE_K = 5.0           # радиус трубки = K * локальный радиус сосуда
+TUBE_SOFT_MM = 1.0     # ширина мягкого края трубки, мм
+COVER_SIGMA_PX = 1.0   # размытие cover гауссом, пикселей
+
+
+def _tube_weight(mask, affine, zooms, lines) -> np.ndarray:
+    """Мягкий вес [0,1] по вокселям: 1 внутри трубки вокруг центрлиний.
+
+    Для каждой точки центрлинии берём радиус (EDT) и закрашиваем мягкую сферу
+    радиусом K*r со спадающим краем TUBE_SOFT_MM. Объединяем по всем сосудам.
+    """
+    points = np.vstack([cl.points for cl in lines.values()])
+    radius, _ = edt_radius_all(mask, affine, zooms, points)
+    tube_r = np.clip(TUBE_K * radius, 0.8, 12.0)
+
+    shape = np.array(mask.shape)
+    spacing = np.abs(np.diag(affine))[:3]
+    nodes_vox = world_to_voxel_index(affine, points)
+    weight = np.zeros(mask.shape, dtype=np.float32)
+    for p, r in zip(nodes_vox, tube_r):
+        rad = np.ceil(r / spacing).astype(int)
+        lo = np.maximum(p - rad, 0)
+        hi = np.minimum(p + rad + 1, shape)
+        if np.any(hi <= lo):
+            continue
+        g = [(np.arange(lo[a], hi[a]) - p[a]) * spacing[a] for a in range(3)]
+        dist = np.sqrt(g[0][:, None, None] ** 2 + g[1][None, :, None] ** 2
+                       + g[2][None, None, :] ** 2)
+        soft = np.clip((r - dist) / TUBE_SOFT_MM, 0.0, 1.0).astype(np.float32)
+        sub = weight[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+        np.maximum(sub, soft, out=sub)
+    return weight
 
 
 def build_overlay(ct, mask, affine, lines) -> np.ndarray:
@@ -129,56 +166,74 @@ def save_png(ct, mask, affine, zooms, lines, path) -> None:
     обрезается по bbox маски с запасом. Сверху/справа — дублирующие оси в мм.
     Центрлинии рисуем ПО ЯЧЕЙКАМ; иначе линия соединяет точки в порядке массива
     и даёт «спагетти»-пятно.
+
+    Серый MIP строится в приоритете по трубке: на пикселях, накрытых проекцией
+    трубки вокруг центрлиний, берётся MIP только внутри трубки (целевой сосуд не
+    перекрывается чужой кровью), иначе — обычный MIP (другие сосуды видны).
     """
     grey = grey_from_hu(ct)
+    tube = _tube_weight(mask, affine, zooms, lines)   # мягкий вес трубки
+    grey_tube = grey * tube
+    # Всё, что не зависит от панели, считаем ОДИН раз (сейчас mask_to_rgb — дорогой).
+    tint_all = mask_to_rgb(mask)                       # uint8 (X,Y,Z,3)
+    mask_bin = (mask > 0).astype(np.float32)           # для по-пиксельной альфы
     present = [int(v) for v in np.unique(mask) if v]
     view = _view_limits(mask, affine)
-    fig, axes = plt.subplots(1, 3, figsize=(19, 6.4), dpi=130)
+    # Две строки: сверху — только сосуды (tube-MIP, без разметки), снизу — разметка.
+    fig, axes = plt.subplots(2, 3, figsize=(19, 11.2), dpi=130,
+                             gridspec_kw={"hspace": 0.22, "wspace": 0.32})
     for k, (title, drop, row, col, rlab, clab) in enumerate(PANELS):
-        ax = axes[k]
         sr, sc = float(zooms[row]), float(zooms[col])
-        proj, flip_r, flip_c = _orient(grey, drop, row, col, affine)
-        # aspect задаём у ОБОИХ imshow: второй вызов без aspect сбросил бы его.
-        ax.imshow(proj, cmap="gray", origin="lower", interpolation="nearest",
-                  vmin=0.0, vmax=1.0, aspect=sr / sc)
-        tint, _, _ = _orient(mask_to_rgb(mask).astype(np.float32) / 255.0,
-                             drop, row, col, affine)
-        # Прозрачность задаём ПО-ПИКСЕЛЬНО: alpha=0 вне маски. Иначе RGB-слой
-        # маски (чёрный фон) с глобальным alpha=0.55 затемняет весь скан до 45%.
-        mask_any, _, _ = _orient((mask > 0).astype(np.float32),
-                                 drop, row, col, affine)
-        ax.imshow(tint, origin="lower", interpolation="nearest",
-                  alpha=ALPHA * mask_any, aspect=sr / sc)
+        base, flip_r, flip_c = _orient(grey, drop, row, col, affine)
+        cover, _, _ = _orient(tube, drop, row, col, affine)
+        # Размываем cover гауссом (в пикселях), чтобы сгладить край ореола.
+        cover = gaussian_filter(cover, sigma=COVER_SIGMA_PX, mode="nearest")
+        target, _, _ = _orient(grey_tube, drop, row, col, affine)
+        # Приоритет: где трубка перекрывает луч, показываем только её содержимое.
+        proj = np.clip(np.maximum(base * (1.0 - cover), target), 0.0, 1.0)
+        tint, _, _ = _orient(tint_all, drop, row, col, affine)
+        mask_any, _, _ = _orient(mask_bin, drop, row, col, affine)
+
+        for j in (0, 1):                   # j=0 — сосуды; j=1 — разметка
+            ax = axes[j, k]
+            # aspect задаём у imshow: без него сбрасывается в equal.
+            ax.imshow(proj, cmap="gray", origin="lower", interpolation="nearest",
+                      vmin=0.0, vmax=1.0, aspect=sr / sc)
+            ax.set_xlim(*view[col])
+            ax.set_ylim(*view[row])
+            ax.set_xlabel(f"{clab}, индекс")
+            ax.set_ylabel(f"{rlab}, индекс")
+            ax.tick_params(labelsize=8)
+            secx = ax.secondary_xaxis("top",
+                                      functions=(lambda i: i * sc, lambda m: m / sc))
+            secy = ax.secondary_yaxis("right",
+                                      functions=(lambda i: i * sr, lambda m: m / sr))
+            secx.set_xlabel(f"{clab}, мм", fontsize=9)
+            secy.set_ylabel(f"{rlab}, мм", fontsize=9)
+            secx.tick_params(labelsize=7)
+            secy.tick_params(labelsize=7)
+
+        axes[0, k].set_title(f"{title} · сосуды", fontsize=11)
+        axes[1, k].set_title("разметка: маски + центрлинии", fontsize=11)
+        # Маска и центрлинии — только в нижней строке.
+        axes[1, k].imshow(tint, origin="lower", interpolation="nearest",
+                          alpha=ALPHA * mask_any, aspect=sr / sc)
         for cl in lines.values():
             c, r = _voxel_in_view(cl.points, affine, row, col, proj.shape, flip_r, flip_c)
             for cell in cl.cells:          # ячейка = непрерывный путь вдоль сосуда
-                ax.plot(c[cell], r[cell], "-", color="black", lw=1.1, zorder=6)
-        ax.set_xlim(*view[col])
-        ax.set_ylim(*view[row])
-        ax.set_title(title, fontsize=11)
-        ax.set_xlabel(f"{clab}, индекс")
-        ax.set_ylabel(f"{rlab}, индекс")
-        ax.tick_params(labelsize=8)
-        # Дублирующие оси в мм (index*spacing), сверху и справа.
-        secx = ax.secondary_xaxis("top", functions=(lambda i: i * sc, lambda m: m / sc))
-        secy = ax.secondary_yaxis("right", functions=(lambda i: i * sr, lambda m: m / sr))
-        secx.set_xlabel(f"{clab}, мм", fontsize=9)
-        secy.set_ylabel(f"{rlab}, мм", fontsize=9)
-        secx.tick_params(labelsize=7)
-        secy.tick_params(labelsize=7)
+                axes[1, k].plot(c[cell], r[cell], "-", color="black", lw=1.1, zorder=6)
 
-    # В легенде показываем уже СМЕШАННЫЙ с серой основой цвет (как на графике),
-    # а не чистую палитру: берём представительный средний тон фона.
-    bg = 0.4
-    handles = [Patch(facecolor=(1 - ALPHA) * bg + ALPHA * np.array(PALETTE[l]) / 255.0,
-                     edgecolor="black", label=f"{l} {SEGMENT_NAMES.get(l, l)}")
-               for l in present]
+    # Легенда: цвет маски, смешанный с БЕЛЫМ фоном (как фон легенды).
+    badges = [(1 - ALPHA) * 1.0 + ALPHA * np.array(PALETTE[l]) / 255.0 for l in present]
+    handles = [Patch(facecolor=badges[i], edgecolor="black",
+                     label=f"{l} {SEGMENT_NAMES.get(l, l)}")
+               for i, l in enumerate(present)]
     handles.append(Line2D([0], [0], color="black", lw=1.4, label="центральная линия"))
     fig.legend(handles=handles, loc="lower center", ncol=min(len(handles), 7),
                frameon=False, fontsize=9)
-    fig.suptitle("Маска сосудов и центрлинии на КТ "
+    fig.suptitle("Верх — сосуды (tube-MIP, без разметки); низ — маски и центрлинии "
                  f"(цвет маски смешан с КТ, α={ALPHA:g})", fontsize=13)
-    fig.tight_layout(rect=(0, 0.08, 1, 0.95))
+    fig.subplots_adjust(top=0.93, bottom=0.085)
     path = common._ensure_parent(path)
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
