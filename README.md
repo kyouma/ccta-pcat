@@ -1,79 +1,48 @@
-# pfai_gen — генерация данных для задачи выделения фрагмента сосуда (pFAI)
+# ccta-pcat
 
-Пайплайн строит обучающие/тестовые примеры вида «скан + две точки →
-фрагмент сосуда» на данных **ImageCAS** (КТ) и **ImageCAS-X** (маски и
-центрлинии коронарных артерий). Для каждого скана генерируются фрагменты трёх
-магистралей — **LAD, LCx, RCA** (LM не используется).
+Репозиторий проекта по анализу перикоронарного жира (PCAT / pFAI) на КТ-ангиографии
+коронарных артерий. Данные: **ImageCAS** (КТ) и **ImageCAS-X** (сегментные маски и
+центрлинии коронарных артерий).
 
-## Что делает
+## Структура
 
-1. Читает маску сегментов и центрлинии (VTK), коренит деревья в устьях.
-2. Для сосуда выбирает две точки: старт в окне `[A, B]` мм от проксимального
-   корня, конец — среди потомков старта, `[C, D]` мм назад от дистального конца.
-3. Смещает точки клика от центрлинии в плоскости поперечного сечения.
-4. Выделяет маску фрагмента (0/1) по ближайшим к пути точкам центрлинии.
-5. Считает радиус сосуда по площади сечения в каждой точке центрлинии.
+```
+generator/   генератор тестовых/обучающих данных (скан + 2 точки -> фрагмент сосуда)
+docs/        (планируется) документация проекта
+detector/    (планируется) детектор/сегментатор сосудов
+```
 
-## Требования
+## Компоненты
 
-- Python-окружение: `/home/o.tonisheva/anaconda3/envs/gendata/bin/python`
-  (`numpy`, `scipy`, `networkx`, `nibabel`, `vtk`, `tifffile`, `matplotlib`).
-- Данные (нативные сетки, ресемплинга нет):
-  - КТ ImageCAS: `/srv/fast1/y.pchelitsev/datasets/ImageCAS/data`
-  - ImageCAS-X: `/srv/fast1/y.pchelitsev/datasets/ImageCAS-X`
-    (`segmentations/`, `centerlines/`, `filelist/`)
+### `generator/`
+Пайплайн генерации примеров «скан + две точки → фрагмент сосуда» для трёх
+магистралей (LAD, LCx, RCA):
 
-Пути заданы в начале `common.py`.
+- `common.py` — чтение данных, граф и корневание центрлиний, атрибуция вокселей,
+  радиус по сечению и EDT, экспорт NIfTI/TIFF, дисковый кэш;
+- `01_cycles.py` — анализ циклов в центrлиниях;
+- `02_overlay.py` — наложение маски сосудов и центрлиний на КТ (TIFF/NIfTI/PNG для
+  ImageJ/Fiji);
+- `03_qc.py` — QC (геометрия, метки, snap, оторванные компоненты, радиусы, длины);
+- `04_generate.py` — генерация 3 фрагментов на скан.
+
+Подробности — в [`generator/README.md`](generator/README.md) и
+[`generator/SPEC.md`](generator/SPEC.md).
 
 ## Быстрый старт
 
 ```bash
-cd /home/y.pchelintsev/vessel-seg/pfai_gen
+cd generator
 PY=/home/o.tonisheva/anaconda3/envs/gendata/bin/python
 
-$PY 01_cycles.py --split test            # распределение циклов в центрлиниях
-$PY 02_overlay.py --ids 961              # маска + центрлинии на КТ (TIFF/NIfTI/PNG)
-$PY 03_qc.py --split test --limit 20     # QC: радиусы, длины, snap, метки
-$PY 04_generate.py --ids 961             # 3 фрагмента (LAD, LCx, RCA) на скан
-$PY 04_generate.py --split test          # весь сплит
+$PY 04_generate.py --ids 961     # 3 фрагмента (LAD, LCx, RCA) на скан
+$PY 04_generate.py --split test  # весь тестовый сплит
 ```
 
-Полезные флаги `04_generate.py`:
-- `--strict-windows` — пропускать сосуды, где окна не влезают (например,
-  короткий проксимальный ствол RCA); иначе окна ужимаются (`windows_clamped`).
-- `--no-cache` — не использовать дисковый кэш предобработки.
+## Данные
 
-## Выходные файлы
+- КТ ImageCAS: `/srv/fast1/y.pchelitsev/datasets/ImageCAS/data`
+- ImageCAS-X: `/srv/fast1/y.pchelitsev/datasets/ImageCAS-X`
 
-| Путь | Что |
-|---|---|
-| `out/cycles/<split>_cycles.csv`, `*_hist.png` | циклы по деревьям |
-| `out/overlay/<scan>_overlay_rgb.tif` | RGB multi-page TIFF для ImageJ/Fiji (рекомендуется) |
-| `out/overlay/<scan>_labels.tif`, `_lut.txt`, `_overlay.png` | метки TIFF, палитра, анатомические QC-проекции (оси в индексах и мм) |
-| `out/overlay/<scan>_overlay_rgb.nii.gz`, `<scan>_labels.nii.gz` | NIfTI-варианты (RGB-NIfTI ImageJ/Fiji читают плохо) |
-| `out/qc/report_<split>.txt`, `vessels_<split>.csv`, `<split>_qc.png` | отчёт QC |
-| `out/generate/fragments/<scan>_<vessel>.nii.gz` | маска фрагмента (0/1) |
-| `out/generate/samples/<scan>_<vessel>.json` | клики, центрлиния, радиусы, метаданные |
-| `out/generate/radii/<scan>_<tree>.npz` | радиус в каждой точке дерева |
-| `out/generate/points.jsonl` | сводка по примерам |
-| `out/generate/qc/<scan>_<vessel>.png` | QC фрагмента: сечения, профиль, маска |
-| `out/cache/<scan>.npz` | дисковый кэш предобработки скана |
-
-## Файлы
-
-| Файл | Роль |
-|---|---|
-| `common.py` | чтение данных, граф/корневание, атрибуция, радиус, NIfTI, кэш |
-| `01_cycles.py` | измерение циклов в центрилиниях |
-| `02_overlay.py` | наложение маски и центрлиний на КТ для ImageJ |
-| `03_qc.py` | QC и анализ (радиусы, длины, snap, целостность дерева) |
-| `04_generate.py` | генерация фрагментов (3 на скан) |
-
-## Известные особенности
-
-- Циклов в центрлиниях `test`/`val` нет; в `train` — 3 дерева из 1120.
-  Поэтому MST не применяется.
-- Маска фрагмента строится по атрибуции вокселей (без подрезки плоскостями),
-  поэтому у концов может заходить на доли вокселя за точку.
-- Подробности реализации, алгоритмы и предостережения для будущих правок —
-  в `SPEC.md`.
+Пути заданы в `generator/common.py`. Артефакты прогонов (`out/`, `*.nii.gz`,
+`*.tif`) не версионируются — воспроизводятся командами выше.
