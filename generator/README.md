@@ -47,7 +47,7 @@ python 04_generate.py --split test          # весь сплит
 |---|---|
 | `out/cycles/<split>_cycles.csv`, `*_hist.png` | циклы по деревьям |
 | `out/overlay/<scan>_overlay_rgb.tif` | RGB multi-page TIFF для ImageJ/Fiji (рекомендуется) |
-| `out/overlay/<scan>_labels.tif`, `_lut.txt`, `_overlay.png` | метки TIFF, палитра, анатомические QC-проекции (оси в индексах и мм) |
+| `out/overlay/<scan>_labels.tif`, `_lut.txt`, `_overlay.png` | метки TIFF, палитра; PNG: 2 строки × 3 проекции (сверху сосуды, снизу маски+центрлинии) |
 | `out/overlay/<scan>_overlay_rgb.nii.gz`, `<scan>_labels.nii.gz` | NIfTI-варианты (RGB-NIfTI ImageJ/Fiji читают плохо) |
 | `out/qc/report_<split>.txt`, `vessels_<split>.csv`, `<split>_qc.png` | отчёт QC |
 | `out/generate/fragments/<scan>_<vessel>.nii.gz` | маска фрагмента (0/1) |

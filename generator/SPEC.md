@@ -156,7 +156,7 @@ radius_section, radius_edt; атрибуцию (vox/node/dist/labels).
 ### 02_overlay.py
 Собирает RGB-объём: серая основа КТ + полупрозрачная цветная маска
 (`out = (1-α)·grey + α·color`, α=0.55) + центрлинии. Серая основа — окно
-`HU_WINDOW` с гамма-коррекцией `GREY_GAMMA` (иначе скан тусклый), показывается
+`HU_WINDOW` (гамма `GREY_GAMMA`, при 1.0 не применяется), показывается
 с фиксированным `vmin/vmax=0..1`. Центрлинии — **чёрные**. Пишет:
 - `<scan>_overlay_rgb.tif` — **RGB multi-page TIFF** (`imagej=True`,
   `axes='ZYXS'`, resolution в пикселях/мм, spacing z) — основной формат для
