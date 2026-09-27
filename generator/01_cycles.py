@@ -127,10 +127,13 @@ def save_histograms(rows: list[dict], path) -> None:
         axes[1].hist(all_lengths, bins=40, color="#00C2A8")
         axes[1].axvline(1.0, color="red", ls="--", lw=1, label="1 мм")
         axes[1].legend(fontsize=8)
-    axes[1].set_title(f"Длины циклов (n={all_lengths.size})\n"
-                      f"p50 {np.median(all_lengths):.2f} мм, "
-                      f"p95 {np.percentile(all_lengths, 95):.2f} мм, "
-                      f"макс {all_lengths.max():.2f} мм" if all_lengths.size else "Циклов нет")
+        title1 = (f"Длины циклов (n={all_lengths.size})\n"
+                  f"p50 {np.median(all_lengths):.2f} мм, "
+                  f"p95 {np.percentile(all_lengths, 95):.2f} мм, "
+                  f"макс {all_lengths.max():.2f} мм")
+    else:
+        title1 = "Длины циклов (n=0): циклов нет"
+    axes[1].set_title(title1)
     axes[1].set_xlabel("длина цикла, мм")
     axes[1].set_ylabel("циклов")
 

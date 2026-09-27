@@ -1,7 +1,8 @@
 """Общие утилиты пайплайна pFAI: чтение данных ImageCAS/ImageCAS-X, граф
 центрлинии, корневание дерева, атрибуция вокселей, радиус сосуда.
 
-Все скрипты 01_cycles / 02_overlay / 03_qc / 04_generate импортируют этот модуль.
+Все скрипты 01_cycles / 02_overlay / 03_qc / 04_generate / 05_qc_generate
+импортируют этот модуль.
 Комментарии по-русски, функции — по одной задаче.
 """
 
@@ -53,6 +54,10 @@ RADIUS_SANITY = (0.2, 3.0) # допустимый радиус сосуда, м�
 MAX_SNAP_MM = 3.0          # порог ухода точки центрлинии от маски (QC)
 HU_WINDOW = (-150.0, 600.0)    # окно для серой основы overlay (контраст ~белый)
 GREY_GAMMA = 1.0               # гамма серой основы (1.0 = без гамма-коррекции)
+# MIP-приоритет по трубке (общий для 02_overlay и 05_qc_generate): на пиксель,
+# накрытый проекцией трубки, берётся MIP только внутри неё.
+TUBE_K = 5.0                   # радиус трубки = K * локальный радиус сосуда
+TUBE_SOFT_MM = 2.0             # ширина мягкого края трубки, мм
 # ImageCAS-X отдаёт центрлинии в VTK, где координаты в LPS (как в ITK/DICOM),
 # а NIfTI хранит мир в RAS. Разница — знак x и y; без этой поправки центрлиния
 # окажется зеркальной относительно маски (проверено: без неё точки вне маски).
@@ -117,6 +122,15 @@ def read_ct(scan_id: str, root: Path = IMAGECAS_CT) -> tuple[np.ndarray, np.ndar
     if data.ndim == 4:
         data = data[..., 0]
     return data, img.affine
+
+
+def ct_affine(scan_id: str, root: Path = IMAGECAS_CT) -> np.ndarray:
+    """Affine КТ без чтения данных: nibabel грузит только заголовок.
+
+    Нужен там, где сверяется геометрия КТ и маски (`check_geometry`), но сам
+    объём КТ не используется — экономит полный I/O объёма на каждый скан.
+    """
+    return np.asarray(nib.load(str(ct_path(scan_id, root))).affine, dtype=float)
 
 
 @lru_cache(maxsize=4)
@@ -802,11 +816,111 @@ def grey_from_hu(ct: np.ndarray, window: tuple = HU_WINDOW,
     return np.power(x, gamma, dtype=np.float32)
 
 
+# --------------------------------------------------------------------------- #
+#  Анатомические проекции (общий код 02_overlay и 05_qc_generate)             #
+# --------------------------------------------------------------------------- #
+
+# Панели: (заголовок, ось проекции drop, вертикальная ось row, горизонтальная
+# ось col, подпись вертикали, подпись горизонтали). Ориентация анатомическая:
+# сагиттальная/корональная с вертикалью S/I (z), аксиальная с вертикалью A/P (y).
+PROJECTION_PANELS = (
+    ("Сагиттальная (вид сбоку, вдоль x)", 0, 2, 1, "S/I (z)", "A/P (y)"),
+    ("Корональная (вид спереди, вдоль y)", 1, 2, 0, "S/I (z)", "R/L (x)"),
+    ("Аксиальная (вид сверху, вдоль z)", 2, 1, 0, "A/P (y)", "R/L (x)"),
+)
+
+
+def orient_mip(volume, drop: int, row: int, col: int, affine) -> tuple:
+    """MIP вдоль оси drop, развёрнутый так, чтобы строки = row, столбцы = col.
+
+    Возвращает (изображение, flip_row, flip_col): флаги нужны, чтобы так же
+    перевернуть координаты центрлиний. Переворот по оси с отрицательным
+    диагональным элементом affine даёт рост мировой координаты вверх/вправо.
+    Поддерживает и скалярный (X,Y,Z), и цветной (X,Y,Z,3) объём.
+    """
+    rem = [i for i in range(3) if i != drop]
+    order = (rem.index(row), rem.index(col))
+    proj = volume.max(axis=drop)
+    if volume.ndim == 4:
+        order = order + (2,)          # после MIP цветовой канал стал последним (ось 2)
+    proj = np.transpose(proj, order)
+    flip_r = bool(affine[row, row] < 0)
+    flip_c = bool(affine[col, col] < 0)
+    if flip_r:
+        proj = proj[::-1]
+    if flip_c:
+        proj = proj[:, ::-1]
+    return proj, flip_r, flip_c
+
+
+def voxel_in_view(points, affine, row, col, shape, flip_r, flip_c):
+    """Мировые точки -> координаты (col, row) в развёрнутом изображении."""
+    vox = to_voxel(affine, points)
+    c = vox[:, col].copy()
+    r = vox[:, row].copy()
+    if flip_r:
+        r = (shape[0] - 1) - r
+    if flip_c:
+        c = (shape[1] - 1) - c
+    return c, r
+
+
+def view_limits(mask, affine, margin_mm: float = 25.0) -> dict:
+    """Границы просмотра по каждой оси: bbox маски + запас, с учётом флипов.
+
+    Показываем область сердца, а не весь кадр: так и скан «крупнее», и ярче.
+    """
+    idx = np.argwhere(mask > 0)
+    n = np.array(mask.shape)
+    lo = idx.min(axis=0) if idx.size else np.zeros(3, int)
+    hi = idx.max(axis=0) if idx.size else n - 1
+    spacing = np.abs(np.diag(affine))[:3]
+    limits = {}
+    for a in range(3):
+        m = int(np.ceil(margin_mm / spacing[a])) if spacing[a] > 0 else 0
+        a0, a1 = max(0, int(lo[a]) - m), min(n[a] - 1, int(hi[a]) + m)
+        limits[a] = ((n[a] - 1 - a1, n[a] - 1 - a0) if affine[a, a] < 0 else (a0, a1))
+    return limits
+
+
+def tube_weight(mask, affine, zooms, lines, k: float, soft_mm: float) -> np.ndarray:
+    """Мягкий вес [0,1] по вокселям: 1 внутри трубки вокруг центрлиний.
+
+    Для каждой точки центрлинии берём радиус (EDT) и закрашиваем мягкую сферу
+    радиусом k*r со спадающим краем, но не шире soft_mm (иначе у тонких сосудов
+    вес в центре не дойдёт до 1). Объединяем по всем сосудам через максимум.
+    """
+    points = np.vstack([cl.points for cl in lines.values()])
+    radius, _ = edt_radius_all(mask, affine, zooms, points)
+    tube_r = np.clip(k * radius, 0.8, 12.0)
+
+    shape = np.array(mask.shape)
+    spacing = np.abs(np.diag(affine))[:3]
+    nodes_vox = world_to_voxel_index(affine, points)
+    weight = np.zeros(mask.shape, dtype=np.float32)
+    for p, r in zip(nodes_vox, tube_r):
+        # Мягкость на узел: не шире половины трубки, иначе у тонких сосудов
+        # вес в центре просвета не дойдёт до 1.
+        soft = min(soft_mm, 0.5 * r)
+        rad = np.ceil(r / spacing).astype(int)
+        lo = np.maximum(p - rad, 0)
+        hi = np.minimum(p + rad + 1, shape)
+        if np.any(hi <= lo):
+            continue
+        g = [(np.arange(lo[a], hi[a]) - p[a]) * spacing[a] for a in range(3)]
+        dist = np.sqrt(g[0][:, None, None] ** 2 + g[1][None, :, None] ** 2
+                       + g[2][None, None, :] ** 2)
+        soft_w = np.clip((r - dist) / soft, 0.0, 1.0).astype(np.float32)
+        sub = weight[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+        np.maximum(sub, soft_w, out=sub)
+    return weight
+
+
 def parse_common_args(description: str) -> argparse.Namespace:
     """Общие аргументы командной строки для скриптов пайплайна.
 
-    Флаги --no-cache и --strict-windows относятся к 04; в остальных скриптах
-    они просто игнорируются (argparse их принимает, код не читает).
+    --strict-windows читает только 04; --no-cache — 04 и 05; в остальных скриптах
+    они игнорируются (argparse их принимает, код не читает).
     """
     ap = argparse.ArgumentParser(description=description)
     ap.add_argument("--split", default="test", help="сплит ImageCAS-X")

@@ -24,7 +24,9 @@ detector/    (планируется) детектор/сегментатор с
 - `02_overlay.py` — наложение маски сосудов и центрлиний на КТ (TIFF/NIfTI/PNG для
   ImageJ/Fiji);
 - `03_qc.py` — QC (геометрия, метки, snap, оторванные компоненты, радиусы, длины);
-- `04_generate.py` — генерация 3 фрагментов на скан.
+- `04_generate.py` — генерация 3 фрагментов на скан;
+- `05_qc_generate.py` — анатомический QC фрагментов (фрагмент, центрлиния и клики
+  на скане с масками, в стиле overlay PNG).
 
 Подробности — в [`generator/README.md`](generator/README.md) и
 [`generator/SPEC.md`](generator/SPEC.md).
@@ -36,6 +38,7 @@ cd generator
 
 python 04_generate.py --ids 961     # 3 фрагмента (LAD, LCx, RCA) на скан
 python 04_generate.py --split test  # весь тестовый сплит
+python 05_qc_generate.py --ids 961  # контекст фрагментов на скане (overlay-стиль)
 ```
 
 ## Данные

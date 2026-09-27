@@ -34,6 +34,7 @@ python 02_overlay.py --ids 961              # маска + центрлинии 
 python 03_qc.py --split test --limit 20     # QC: радиусы, длины, snap, метки
 python 04_generate.py --ids 961             # 3 фрагмента (LAD, LCx, RCA) на скан
 python 04_generate.py --split test          # весь сплит
+python 05_qc_generate.py --ids 961          # контекст фрагментов на скане (overlay-стиль)
 ```
 
 Полезные флаги `04_generate.py`:
@@ -55,6 +56,7 @@ python 04_generate.py --split test          # весь сплит
 | `out/generate/radii/<scan>_<tree>.npz` | радиус в каждой точке дерева |
 | `out/generate/points.jsonl` | сводка по примерам |
 | `out/generate/qc/<scan>_<vessel>.png` | QC фрагмента: сечения, профиль, маска |
+| `out/generate/qc/<scan>_<vessel>_context.png` | контекст фрагмента на скане (2×3 проекции, overlay-стиль) |
 | `out/cache/<scan>.npz` | дисковый кэш предобработки скана |
 
 ## Файлы
@@ -66,6 +68,7 @@ python 04_generate.py --split test          # весь сплит
 | `02_overlay.py` | наложение маски и центрлиний на КТ для ImageJ |
 | `03_qc.py` | QC и анализ (радиусы, длины, snap, целостность дерева) |
 | `04_generate.py` | генерация фрагментов (3 на скан) |
+| `05_qc_generate.py` | анатомический QC фрагментов: фрагмент/центрлиния/клики на скане |
 
 ## Известные особенности
 

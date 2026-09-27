@@ -27,7 +27,7 @@ from tqdm import tqdm
 
 import common
 from common import (MAX_SNAP_MM, RADIUS_SANITY, SEGMENT_NAMES, TARGET_IDS, build_graph,
-                    edt_radius_all, node_tangents, read_centerline, read_ct, read_mask,
+                    ct_affine, edt_radius_all, node_tangents, read_centerline, read_mask,
                     root_tree, to_world, vessel_mask, vessel_nodes)
 
 
@@ -52,7 +52,7 @@ class Report:
 
 def qc_scan(scan_id: str) -> tuple[dict, list[dict]]:
     """Проверки чтения/дерева и радиусы целевых сосудов одного скана."""
-    ct, aff = read_ct(scan_id)
+    aff = ct_affine(scan_id)
     mask, aff_m, zooms = read_mask(scan_id)
     common.check_geometry(aff, aff_m)
 
