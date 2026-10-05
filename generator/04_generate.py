@@ -1,15 +1,15 @@
 """04 — генерация примеров: 3 фрагмента на скан (LAD, LCx, RCA).
 
 Для каждого скана и каждого целевого сосуда:
-  1. на ветке выбирается случайная точка старта в [A, B] мм от проксимального
-     корня сосуда;
-  2. среди потомков старта — случайная точка конца в [C, D] мм назад от
-     дистального конца сосуда;
-  3. точки клика смещаются от центрлинии в плоскости сечения (случайный воксель
+  1. на ветке выбирается случайная точка старта в окне [A, B] мм;
+  2. среди потомков старта — случайная точка конца в окне [C, D] мм;
+  3. окна задаются знаковыми смещениями (`WINDOWS`): >= 0 — от начала сосуда
+     (устья; для LAD/LCx — от бифуркации LM), < 0 — от его конца;
+  4. точки клика смещаются от центрлинии в плоскости сечения (случайный воксель
      маски, через который проходит плоскость);
-  4. фрагмент маски — воксели, ближайшая точка центрлинии которых лежит на
+  5. фрагмент маски — воксели, ближайшая точка центрлинии которых лежит на
      выбранном отрезке пути;
-  5. считаются радиусы по сечению (и EDT как cross-check) в точках.
+  6. считаются радиусы по сечению (и EDT как cross-check) в точках.
 
 Выход:
   out/generate/fragments/<scan>_<vessel>.nii.gz   маска фрагмента (0/1)
@@ -47,10 +47,32 @@ CONNECTIVITY_26 = np.ones((3, 3, 3), dtype=bool)
 #  Выбор точек                                                                #
 # --------------------------------------------------------------------------- #
 
-def pick_start_end(rng, rooted: Rooted, label: int, strict: bool = False) -> dict | None:
-    """Случайные start (в [A,B] от корня сосуда) и end (потомок, [C,D] от конца).
+def _offset_to_arc(offset: float, arc_root: float, arc_tip: float) -> float:
+    """Знаковое смещение вдоль сосуда (мм) -> arc от устья.
 
-    Если стандартные окна не влезают в короткий сосуд, они ужимаются так, чтобы
+    < 0 — расстояние от конца сосуда (`arc_tip`), >= 0 — от начала
+    (`arc_root`). Ноль считается началом; ровно конец задавайте малым
+    отрицательным (напр. -1e-6) — -0.0 намеренно НЕ различается (хрупко:
+    int -0, JSON/YAML, abs/агрегации теряют знак).
+    """
+    offset = float(offset)
+    if offset < 0.0:
+        return arc_tip + offset
+    return arc_root + offset
+
+
+def _window_bounds(window, arc_root: float, arc_tip: float) -> tuple:
+    """(lo, hi) дуги по окну (a, b) со знаковыми смещениями, отсортированные."""
+    p0 = _offset_to_arc(window[0], arc_root, arc_tip)
+    p1 = _offset_to_arc(window[1], arc_root, arc_tip)
+    return (p0, p1) if p0 <= p1 else (p1, p0)
+
+
+def pick_start_end(rng, rooted: Rooted, label: int, strict: bool = False) -> dict | None:
+    """Случайные start (окно [A,B]) и end (потомок, окно [C,D]).
+
+    Окна — знаковые смещения в мм: >= 0 от начала сосуда, < 0 от конца (см.
+    `WINDOWS`). Если окна не влезают в короткий сосуд, они ужимаются так, чтобы
     всё равно получить фрагмент длины >= MIN_FRAGMENT_MM (флаг clamped). При
     strict=True такие сосуды пропускаются.
     """
@@ -58,7 +80,7 @@ def pick_start_end(rng, rooted: Rooted, label: int, strict: bool = False) -> dic
     if len(idx) < 2:
         return None
     name = SEGMENT_NAMES[label].upper()
-    A, B, C, D = WINDOWS.get(name, (0.0, 40.0, 0.0, 40.0))
+    A, B, C, D = WINDOWS.get(name, (0.0, 5.0, 35.0, 40.0))
 
     arc_root, arc_tip = float(arc.min()), float(arc.max())
     length = arc_tip - arc_root
@@ -67,9 +89,10 @@ def pick_start_end(rng, rooted: Rooted, label: int, strict: bool = False) -> dic
 
     # Окно старта, ужатое до [arc_root, arc_tip - MIN]. При strict=True такие
     # сосуды (короче окна, напр. ранняя бифуркация RCA) будут пропущены.
-    lo = min(arc_root + A, arc_tip - MIN_FRAGMENT_MM)
-    hi = min(arc_root + B, arc_tip - MIN_FRAGMENT_MM)
-    clamped = (lo > arc_root + A + 1e-9) or (hi < arc_root + B - 1e-9)
+    s0, s1 = _window_bounds((A, B), arc_root, arc_tip)
+    lo = max(s0, arc_root)
+    hi = min(s1, arc_tip - MIN_FRAGMENT_MM)
+    clamped = (lo > s0 + 1e-9) or (hi < s1 - 1e-9)
     if hi < lo:
         lo = hi = arc_root
         clamped = True
@@ -84,8 +107,9 @@ def pick_start_end(rng, rooted: Rooted, label: int, strict: bool = False) -> dic
         return None
     arc_cand = np.array([rooted.arc[int(i)] for i in cand])
 
-    # Окно конца от дистального конца, ужатое до [start + MIN, arc_tip].
-    raw_end_arc = arc_tip - rng.uniform(C, D)
+    # Окно конца по знаковым смещениям, ужатое до [start + MIN, arc_tip].
+    e0, e1 = _window_bounds((C, D), arc_root, arc_tip)
+    raw_end_arc = e0 if e1 - e0 < 1e-9 else rng.uniform(e0, e1)
     end_arc = float(np.clip(raw_end_arc, rooted.arc[start] + MIN_FRAGMENT_MM, arc_tip))
     clamped = clamped or abs(end_arc - raw_end_arc) > 1e-9
     end = int(cand[int(np.argmin(np.abs(arc_cand - end_arc)))])
