@@ -35,11 +35,12 @@ from scipy.ndimage import label as cc_label, median_filter
 from tqdm import tqdm
 
 import common
-from common import (MIN_FRAGMENT_MM, SEGMENT_NAMES, TARGET_IDS, WINDOWS,
+from common import (MIN_FRAGMENT_MM, SECTION_HALF_MM, SEGMENT_NAMES, TARGET_IDS, WINDOWS,
                     Attribution, Rooted, path_between, prepare_scan, save_mask_nifti,
                     section_area, section_coverage, vessel_nodes)
 
 MAX_ATTEMPTS = 30          # попыток выбрать допустимый фрагмент на сосуд
+CLICK_COV_MIN = 0.9        # минимальное покрытие cov в точке клика
 CONNECTIVITY_26 = np.ones((3, 3, 3), dtype=bool)
 
 
@@ -127,27 +128,36 @@ def pick_start_end(rng, rooted: Rooted, label: int, strict: bool = False) -> dic
 #  Клик и фрагмент                                                            #
 # --------------------------------------------------------------------------- #
 
-def make_click(rng, vm, point: np.ndarray, tangent: np.ndarray, zooms: tuple,
-               radius: float) -> dict:
+def make_click(rng, vm, mask_bin, affine, point: np.ndarray, tangent: np.ndarray,
+               zooms: tuple, radius: float, cov_min: float = CLICK_COV_MIN) -> dict:
     """Смещение клика: случайный воксель просвета в плоскости сечения точки.
 
-    Слой вдоль касательной берём таким же, как у радиуса и у QC-среза
-    (полвокселя), а боковой отступ ограничиваем радиусом среза, чтобы не поймать
-    другую часть сосуда в том же слое. Тогда выбранный клик всегда лежит внутри
-    отображаемого поперечного сечения.
+    Слой вдоль касательной — как у радиуса и QC-среза (полвокселя). Из кандидатов
+    оставляем только воксели с покрытием `cov > cov_min` (по той же плоскости
+    `section_coverage`, что и радиус/QC), т.е. не у самой стенки. Если таких нет —
+    точка остаётся на центрлинии (`inside=False`).
     """
     half_slab = 0.5 * float(min(zooms))
     rel = vm.points - point
     axial = rel @ tangent
     lateral = np.linalg.norm(rel - np.outer(axial, tangent), axis=1)
-    # Боковой предел ровно по радиусу: клик обязан лежать внутри просвета и
-    # внутри окружности радиуса на QC-срезе. Иначе брали до 1.5*r и точка
-    # оказывалась за маской и за окружностью.
-    limit = float(radius)
-    ok = (np.abs(axial) <= half_slab) & (lateral <= limit)
+    ok = (np.abs(axial) <= half_slab) & (lateral <= float(radius))
     if not ok.any():
         return {"click": point, "offset_mm": 0.0, "inside": False}
-    click = point + rel[ok][int(rng.integers(int(ok.sum())))]
+
+    cand = rel[ok]
+    cov, e1, e2, step = section_coverage(mask_bin, affine, point, tangent,
+                                         half_mm=SECTION_HALF_MM)
+    n = cov.shape[0]
+    iu = np.rint((cand @ e1 + SECTION_HALF_MM) / step).astype(int)
+    iv = np.rint((cand @ e2 + SECTION_HALF_MM) / step).astype(int)
+    inside = (iu >= 0) & (iu < n) & (iv >= 0) & (iv < n)
+    covv = np.zeros(len(cand))
+    covv[inside] = cov[iv[inside], iu[inside]]
+    good = covv > cov_min
+    if not good.any():
+        return {"click": point, "offset_mm": 0.0, "inside": False}
+    click = point + cand[good][int(rng.integers(int(good.sum())))]
     return {"click": click, "offset_mm": float(np.linalg.norm(click - point)), "inside": True}
 
 
@@ -174,7 +184,17 @@ def extract_fragment(mask: np.ndarray, attr: Attribution, tree: str,
 #  QC-картинка                                                                #
 # --------------------------------------------------------------------------- #
 
-SECTION_VIEW_HALF = 4.0   # полуразмер окна QC-среза, мм
+QC_CROP_HALF_MM = 4.0     # окно ПОКАЗА QC-среза (кроп из сетки SECTION_HALF_MM)
+
+
+def _crop_view(cov, step, crop_half):
+    """Центральный кроп сетки `cov` под окно ±crop_half мм (0 — центр сетки)."""
+    n = cov.shape[0]
+    c = (n - 1) // 2
+    k = min(int(round(crop_half / step)), c)
+    sub = cov[c - k:c + k + 1, c - k:c + k + 1]
+    e = k * step
+    return sub, [-e, e, -e, e]
 
 
 def save_qc(mask, affine, zooms, tree, vessel_label, path_nodes, path_arc,
@@ -191,11 +211,11 @@ def save_qc(mask, affine, zooms, tree, vessel_label, path_nodes, path_arc,
         p = cl.points[i]
         ax = fig.add_subplot(gs[0, j])
         ax.set_facecolor("#101014")
-        cov, e1, e2, _ = section_coverage(vessel_bin, affine, p, tang[i],
-                                          half_mm=SECTION_VIEW_HALF)
-        ax.imshow(cov, extent=[-SECTION_VIEW_HALF, SECTION_VIEW_HALF,
-                               -SECTION_VIEW_HALF, SECTION_VIEW_HALF],
-                  origin="lower", cmap="Greens", vmin=0.0, vmax=1.0, alpha=0.9)
+        cov, e1, e2, step = section_coverage(vessel_bin, affine, p, tang[i],
+                                             half_mm=SECTION_HALF_MM)
+        sub, ext = _crop_view(cov, step, QC_CROP_HALF_MM)
+        ax.imshow(sub, extent=ext, origin="lower", cmap="Greens",
+                  vmin=0.0, vmax=1.0, alpha=0.9)
         r = path_radius[0] if key == "start" else path_radius[-1]
         ax.add_patch(plt.Circle((0, 0), r, fill=False, color="cyan", ls="--", lw=1.6))
         ax.plot([0], [0], "o", color="white", ms=9, mec="black", zorder=6)
@@ -314,10 +334,10 @@ def generate_vessel(scan_id, mask, affine, zooms, centered: dict, attr: Attribut
         # Сглаживание профиля вдоль фрагмента: маска неровная, сырой r шумит.
         r_plot = median_filter(r_new, size=5, mode="nearest") if len(r_new) >= 5 else r_new
         clicks = [
-            make_click(rng, vm, cl.points[path_nodes[0]], tang[path_nodes[0]], zooms,
-                       float(r_new[0])),
-            make_click(rng, vm, cl.points[path_nodes[-1]], tang[path_nodes[-1]], zooms,
-                       float(r_new[-1])),
+            make_click(rng, vm, vessel_bin, affine, cl.points[path_nodes[0]],
+                       tang[path_nodes[0]], zooms, float(r_new[0])),
+            make_click(rng, vm, vessel_bin, affine, cl.points[path_nodes[-1]],
+                       tang[path_nodes[-1]], zooms, float(r_new[-1])),
         ]
 
         name = SEGMENT_NAMES[label]

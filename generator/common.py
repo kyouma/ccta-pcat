@@ -467,8 +467,10 @@ def section_coverage(binary_mask, affine, point, tangent,
     _, e1, e2 = _section_basis(tangent)
     if step is None:
         step = float(min(np.abs(np.diag(affine))[:3])) / 2.0
-    n = int(round(2 * half_mm / step)) + 1
+    # Нечётное n: узел 0 попадает в сетку, кроп и площадь симметричны.
+    n = 2 * int(round(half_mm / step)) + 1
     g = np.linspace(-half_mm, half_mm, n)
+    step = float(2.0 * half_mm / (n - 1))            # фактический шаг сетки
     u, v = np.meshgrid(g, g)                         # u — столбцы (e1), v — строки (e2)
     point = np.asarray(point, float)
     world = (point[None, None, :]
