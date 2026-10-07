@@ -53,8 +53,8 @@ python 05_qc_generate.py --ids 961          # контекст фрагмент�
 | `out/overlay/<scan>_overlay_rgb.nii.gz`, `<scan>_labels.nii.gz` | NIfTI-варианты (RGB-NIfTI ImageJ/Fiji читают плохо) |
 | `out/qc/report_<split>.txt`, `vessels_<split>.csv`, `<split>_qc.png` | отчёт QC |
 | `out/generate/fragments/<scan>_<vessel>.nii.gz` | маска фрагмента (0/1) |
-| `out/generate/samples/<scan>_<vessel>.json` | клики, центрлиния, радиусы, метаданные |
-| `out/generate/radii/<scan>_<tree>.npz` | радиус в каждой точке дерева |
+| `out/generate/samples/<scan>_<vessel>.json` | клики, центрлиния, радиусы (`radius_mm` — интеграл по плоскости среза, `radius_kawaleri_mm` — старый метод, `radius_edt_mm`), метаданные |
+| `out/generate/radii/<scan>_<tree>.npz` | радиус в каждой точке дерева (метод Кавалери) |
 | `out/generate/points.jsonl` | сводка по примерам |
 | `out/generate/qc/<scan>_<vessel>.png` | QC фрагмента: сечения, профиль, маска |
 | `out/generate/qc/<scan>_<vessel>_context.png` | контекст фрагмента на скане (2×3 проекции, overlay-стиль) |

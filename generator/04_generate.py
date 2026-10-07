@@ -31,13 +31,13 @@ matplotlib.use("Agg")
 import matplotlib.lines as mlines
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.ndimage import binary_dilation, label as cc_label, median_filter
+from scipy.ndimage import label as cc_label, median_filter
 from tqdm import tqdm
 
 import common
 from common import (MIN_FRAGMENT_MM, SEGMENT_NAMES, TARGET_IDS, WINDOWS,
                     Attribution, Rooted, path_between, prepare_scan, save_mask_nifti,
-                    vessel_nodes)
+                    section_area, section_coverage, vessel_nodes)
 
 MAX_ATTEMPTS = 30          # попыток выбрать допустимый фрагмент на сосуд
 CONNECTIVITY_26 = np.ones((3, 3, 3), dtype=bool)
@@ -177,50 +177,25 @@ def extract_fragment(mask: np.ndarray, attr: Attribution, tree: str,
 SECTION_VIEW_HALF = 4.0   # полуразмер окна QC-среза, мм
 
 
-def _section_from_points(points, zooms, point, tangent, half=SECTION_VIEW_HALF):
-    """2D-срез из вокселей сосуда: растеризуем их проекции на плоскость.
-
-    Так срез строится по ТЕМ ЖЕ вокселям, из которых выбирается клик, поэтому
-    клик гарантированно виден внутри маски (в отличие от ресемплинга маски на
-    сетку, который мог «промахнуться» на косом сосуде).
-    """
-    t = tangent / (np.linalg.norm(tangent) or 1.0)
-    a = np.array([1.0, 0, 0]) if abs(t[0]) < 0.9 else np.array([0.0, 1, 0])
-    e1 = np.cross(t, a)
-    e1 /= np.linalg.norm(e1)
-    e2 = np.cross(t, e1)
-    rel = points - point
-    axial = rel @ t
-    m = np.abs(axial) <= 0.5 * float(min(zooms))
-    uu, vv = rel[m] @ e1, rel[m] @ e2
-    # Шаг сетки = размер вокселя, чтобы соседние воксели давали залитую маску,
-    # а не россыпь точек; дилатация сглаживает межслойные промежутки.
-    step = float(min(zooms))
-    n = int(round(2 * half / step)) + 1
-    grid = np.zeros((n, n), dtype=bool)
-    iu = np.rint((uu + half) / step).astype(int)
-    iv = np.rint((vv + half) / step).astype(int)
-    ok = (iu >= 0) & (iu < n) & (iv >= 0) & (iv < n)
-    grid[iv[ok], iu[ok]] = True
-    grid = binary_dilation(grid, np.ones((3, 3), bool))
-    return grid, e1, e2
-
-
-def save_qc(zooms, tree, vessel_label, path_nodes, path_arc, path_radius,
-            tang, clicks, frag, vm, path_out) -> None:
+def save_qc(mask, affine, zooms, tree, vessel_label, path_nodes, path_arc,
+            path_radius, tang, clicks, frag, path_out) -> None:
     cl = tree.cl
     fig = plt.figure(figsize=(19, 5.4), dpi=130)
     gs = fig.add_gridspec(1, 4, width_ratios=[1, 1, 1.2, 1.2], wspace=0.3)
 
+    # Срез строится в плоскости по БИНАРНОЙ маске целевого сосуда (mask == label):
+    # иначе map_coordinates интерполирует номера меток и граница/площадь врут.
+    vessel_bin = (mask == vessel_label).astype(np.float32)
     for j, key in enumerate(("start", "end")):
         i = path_nodes[0] if key == "start" else path_nodes[-1]
         p = cl.points[i]
         ax = fig.add_subplot(gs[0, j])
         ax.set_facecolor("#101014")
-        acc, e1, e2 = _section_from_points(vm.points, zooms, p, tang[i])
-        ax.imshow(acc, extent=[-SECTION_VIEW_HALF, SECTION_VIEW_HALF,
+        cov, e1, e2, _ = section_coverage(vessel_bin, affine, p, tang[i],
+                                          half_mm=SECTION_VIEW_HALF)
+        ax.imshow(cov, extent=[-SECTION_VIEW_HALF, SECTION_VIEW_HALF,
                                -SECTION_VIEW_HALF, SECTION_VIEW_HALF],
-                  origin="lower", cmap="Greens", alpha=0.9)
+                  origin="lower", cmap="Greens", vmin=0.0, vmax=1.0, alpha=0.9)
         r = path_radius[0] if key == "start" else path_radius[-1]
         ax.add_patch(plt.Circle((0, 0), r, fill=False, color="cyan", ls="--", lw=1.6))
         ax.plot([0], [0], "o", color="white", ms=9, mec="black", zorder=6)
@@ -281,7 +256,7 @@ def save_qc(zooms, tree, vessel_label, path_nodes, path_arc, path_radius,
 #  Генерация одного сосуда                                                    #
 # --------------------------------------------------------------------------- #
 
-def _json_point(i, rooted, path_arc, path_radius, path_edt, clicks, j) -> dict:
+def _json_point(i, rooted, path_arc, path_radius, path_edt, path_kaw, clicks, j) -> dict:
     p = rooted.cl.points[i]
     k = -1 if j == 1 else 0
     return {
@@ -291,6 +266,7 @@ def _json_point(i, rooted, path_arc, path_radius, path_edt, clicks, j) -> dict:
         "click_offset_mm": round(float(clicks[j]["offset_mm"]), 4),
         "click_inside": bool(clicks[j]["inside"]),
         "radius_mm": round(float(path_radius[k]), 4),
+        "radius_kawaleri_mm": round(float(path_kaw[k]), 4),
         "radius_edt_mm": round(float(path_edt[k]), 4),
     }
 
@@ -305,6 +281,8 @@ def generate_vessel(scan_id, mask, affine, zooms, centered: dict, attr: Attribut
     prof = radii[tree_name]
     tang = prof["tangent"]
     vm = vms[label]
+    # Бинарная маска целевого сосуда — один раз на сосуд (для срезов/радиуса).
+    vessel_bin = (mask == label).astype(np.float32)
 
     # Чистим возможные старые файлы этого сосуда (важно при смене флагов).
     sample_id = f"{scan_id}_{SEGMENT_NAMES[label].lower()}"
@@ -326,15 +304,20 @@ def generate_vessel(scan_id, mask, affine, zooms, centered: dict, attr: Attribut
         if stats["n_voxels"] == 0 or stats["n_components"] != 1:
             continue
 
-        r_sec = prof["radius_section"][path_nodes]
+        # Новый радиус/площадь: интеграл покрытия по плоскости среза.
+        r_new = np.sqrt(np.array([
+            section_area(vessel_bin, affine, cl.points[i], tang[i]) / np.pi
+            for i in path_nodes]))
+        # Старый метод (Кавалери по 3D-вокселям) — для сравнения.
+        r_kaw = prof["radius_section"][path_nodes]
         r_edt = prof["radius_edt"][path_nodes]
         # Сглаживание профиля вдоль фрагмента: маска неровная, сырой r шумит.
-        r_plot = median_filter(r_sec, size=5, mode="nearest") if len(r_sec) >= 5 else r_sec
+        r_plot = median_filter(r_new, size=5, mode="nearest") if len(r_new) >= 5 else r_new
         clicks = [
             make_click(rng, vm, cl.points[path_nodes[0]], tang[path_nodes[0]], zooms,
-                       float(r_sec[0])),
+                       float(r_new[0])),
             make_click(rng, vm, cl.points[path_nodes[-1]], tang[path_nodes[-1]], zooms,
-                       float(r_sec[-1])),
+                       float(r_new[-1])),
         ]
 
         name = SEGMENT_NAMES[label]
@@ -347,22 +330,23 @@ def generate_vessel(scan_id, mask, affine, zooms, centered: dict, attr: Attribut
             "windows_mm": pick["windows_mm"], "windows_clamped": pick["clamped"],
             "n_points": len(path_nodes),
             "length_mm": round(float(path_arc[-1] - path_arc[0]), 3),
-            "points": [_json_point(i, rooted, path_arc, r_plot, r_edt, clicks, j)
+            "points": [_json_point(i, rooted, path_arc, r_plot, r_edt, r_kaw, clicks, j)
                        for j, i in enumerate((path_nodes[0], path_nodes[-1]))],
             "centerline": [
                 {"arc_mm": round(float(a), 4),
                  "xyz": [round(float(v), 4) for v in cl.points[i]],
                  "radius_mm": round(float(r), 4),
-                 "radius_raw_mm": round(float(rr), 4)}
-                for i, a, r, rr in zip(path_nodes, path_arc, r_plot, r_sec)],
+                 "radius_raw_mm": round(float(rr), 4),
+                 "radius_kawaleri_mm": round(float(kk), 4)}
+                for i, a, r, rr, kk in zip(path_nodes, path_arc, r_plot, r_new, r_kaw)],
             "fragment": stats,
             "mask_nii": str(nii),
         }
         common._ensure_parent(out_dir / "samples" / f"{sample_id}.json").write_text(
             json.dumps(sample, ensure_ascii=False, indent=1), encoding="utf-8")
 
-        save_qc(zooms, rooted, label, path_nodes, path_arc, r_plot,
-                tang, clicks, frag, vm, out_dir / "qc" / f"{sample_id}.png")
+        save_qc(mask, affine, zooms, rooted, label, path_nodes, path_arc, r_plot,
+                tang, clicks, frag, out_dir / "qc" / f"{sample_id}.png")
         index_rows.append({
             "sample_id": sample_id, "scan_id": scan_id, "vessel": name,
             "length_mm": sample["length_mm"], "n_voxels": stats["n_voxels"],

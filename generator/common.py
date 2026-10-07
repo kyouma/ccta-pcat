@@ -18,7 +18,7 @@ from pathlib import Path
 import nibabel as nib
 import networkx as nx
 import numpy as np
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, map_coordinates
 from scipy.spatial import cKDTree
 
 # --------------------------------------------------------------------------- #
@@ -452,6 +452,49 @@ def _section_basis(tangent: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndar
     return t, e1, e2
 
 
+def section_coverage(binary_mask, affine, point, tangent,
+                     half_mm: float = SECTION_HALF_MM, step: float | None = None,
+                     order: int = 1) -> tuple:
+    """Покрытие маски в плоскости среза (partial volume) и базис плоскости.
+
+    Строит сетку `(e1, e2)` в мировых мм вокруг `point` (нормаль — `tangent`) и
+    сэмплит маску трилинейно (`map_coordinates`). На выходе `cov` в [0, 1] (доля
+    вокселя), `e1`, `e2` и шаг сетки. Подавайте **бинарную** (0/1) маску целевого
+    сосуда: значения меток > 1 исказят и покрытие, и площадь, и порог отображения.
+    Маску лучше передавать уже во `float32` (иначе конвертация объёма на каждый
+    вызов дорога); порядок осей (C/F) не важен — `map_coordinates` обрабатывает.
+    """
+    _, e1, e2 = _section_basis(tangent)
+    if step is None:
+        step = float(min(np.abs(np.diag(affine))[:3])) / 2.0
+    n = int(round(2 * half_mm / step)) + 1
+    g = np.linspace(-half_mm, half_mm, n)
+    u, v = np.meshgrid(g, g)                         # u — столбцы (e1), v — строки (e2)
+    point = np.asarray(point, float)
+    world = (point[None, None, :]
+             + u[..., None] * e1[None, None, :]
+             + v[..., None] * e2[None, None, :])
+    vox = to_voxel(affine, world.reshape(-1, 3)).reshape(n, n, 3)
+    cov = map_coordinates(np.asarray(binary_mask, dtype=np.float32),
+                          np.moveaxis(vox, -1, 0), order=order,
+                          mode="constant", cval=0.0)
+    return cov, e1, e2, float(step)
+
+
+def section_area(binary_mask, affine, point, tangent,
+                 half_mm: float = SECTION_HALF_MM, step: float | None = None,
+                 order: int = 1) -> float:
+    """Площадь поперечного сечения как интеграл покрытия по плоскости среза.
+
+    `A = Σ cov · step²` (мм²) — по той же плоскости, что и QC-визуализация.
+    Старый метод `VesselMask.section_radius` (Кавалери по 3D-вокселям) оставлен
+    рядом для сравнения.
+    """
+    cov, _, _, step = section_coverage(binary_mask, affine, point, tangent,
+                                       half_mm=half_mm, step=step, order=order)
+    return float(cov.sum()) * step * step
+
+
 @dataclass
 class VesselMask:
     """Воксели одного сосуда (метки) как KD-tree, для быстрого радиуса по сечению."""
@@ -465,10 +508,10 @@ class VesselMask:
                        half_mm: float = SECTION_HALF_MM) -> tuple[float, float]:
         """Радиус по площади поперечного сечения (оценка Кавалери).
 
-        Считаем объём вокселей в тонком цилиндре радиуса half_mm и толщины w
-        вокруг точки; A = N * voxel_volume / w, r = sqrt(A / pi). Медиана по
-        нескольким w гасит шум дискретизации. В отличие от объединения
-        подслоёв, не раздувает площадь косого сосуда.
+        **Старый метод** (до интеграла по плоскости среза); оставлен для
+        сравнения с `section_area`. Считаем объём вокселей в тонком цилиндре
+        радиуса half_mm и толщины w вокруг точки; A = N * voxel_volume / w,
+        r = sqrt(A / pi). Медиана по нескольким w гасит шум дискретизации.
         """
         t, _, _ = _section_basis(tangent)
         w0 = max(float(min(self.zooms)), 0.25)
