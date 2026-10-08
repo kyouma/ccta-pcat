@@ -31,7 +31,7 @@ matplotlib.use("Agg")
 import matplotlib.lines as mlines
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.ndimage import label as cc_label, median_filter
+from scipy.ndimage import distance_transform_edt, label as cc_label, median_filter
 from tqdm import tqdm
 
 import common
@@ -40,7 +40,9 @@ from common import (MIN_FRAGMENT_MM, SECTION_HALF_MM, SEGMENT_NAMES, TARGET_IDS,
                     section_area, section_coverage, vessel_nodes)
 
 MAX_ATTEMPTS = 30          # попыток выбрать допустимый фрагмент на сосуд
-CLICK_COV_MIN = 0.9        # минимальное покрытие cov в точке клика
+CLICK_REGION_COV = 0.5     # порог cov, задающий просвет в плоскости среза
+CLICK_DEPTH_FRAC = 0.3     # отступ клика от границы как доля локального радиуса
+CLICK_DEPTH_MIN_VOX = 0.5  # ... но не меньше стольких вокселей (min(zooms))
 CONNECTIVITY_26 = np.ones((3, 3, 3), dtype=bool)
 
 
@@ -129,13 +131,15 @@ def pick_start_end(rng, rooted: Rooted, label: int, strict: bool = False) -> dic
 # --------------------------------------------------------------------------- #
 
 def make_click(rng, vm, mask_bin, affine, point: np.ndarray, tangent: np.ndarray,
-               zooms: tuple, radius: float, cov_min: float = CLICK_COV_MIN) -> dict:
+               zooms: tuple, radius: float, region_cov: float = CLICK_REGION_COV,
+               depth_frac: float = CLICK_DEPTH_FRAC) -> dict:
     """Смещение клика: случайный воксель просвета в плоскости сечения точки.
 
-    Слой вдоль касательной — как у радиуса и QC-среза (полвокселя). Из кандидатов
-    оставляем только воксели с покрытием `cov > cov_min` (по той же плоскости
-    `section_coverage`, что и радиус/QC), т.е. не у самой стенки. Если таких нет —
-    точка остаётся на центрлинии (`inside=False`).
+    Слой вдоль касательной — как у радиуса и QC-среза (полвокселя). Просвет в
+    плоскости задаём как `cov >= region_cov` (0.5) и оставляем кандидатов не
+    ближе `margin` к его границе — `depth = distance_transform_edt(region)` в мм.
+    `margin = max(CLICK_DEPTH_MIN_VOX·min(zooms), depth_frac·radius)`. Если
+    подходящих нет — точка остаётся на центрлинии (`inside=False`).
     """
     half_slab = 0.5 * float(min(zooms))
     rel = vm.points - point
@@ -152,9 +156,12 @@ def make_click(rng, vm, mask_bin, affine, point: np.ndarray, tangent: np.ndarray
     iu = np.rint((cand @ e1 + SECTION_HALF_MM) / step).astype(int)
     iv = np.rint((cand @ e2 + SECTION_HALF_MM) / step).astype(int)
     inside = (iu >= 0) & (iu < n) & (iv >= 0) & (iv < n)
-    covv = np.zeros(len(cand))
-    covv[inside] = cov[iv[inside], iu[inside]]
-    good = covv > cov_min
+    # Глубина от границы просвета в плоскости (region = cov >= region_cov), мм.
+    depth = distance_transform_edt(cov >= region_cov, sampling=(step, step))
+    dv = np.zeros(len(cand))
+    dv[inside] = depth[iv[inside], iu[inside]]
+    margin = max(CLICK_DEPTH_MIN_VOX * float(min(zooms)), depth_frac * float(radius))
+    good = dv > margin
     if not good.any():
         return {"click": point, "offset_mm": 0.0, "inside": False}
     click = point + cand[good][int(rng.integers(int(good.sum())))]
